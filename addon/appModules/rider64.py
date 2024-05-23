@@ -6,10 +6,12 @@
 
 
 import NVDAObjects
+import NVDAObjects.JAB
 from buildVersion import version_year
 from dataclasses import dataclass
 from unicodedata import category
 import appModuleHandler
+import textInfos
 import tones
 import controlTypes
 import config
@@ -113,6 +115,9 @@ if config.conf.get(CONF_KEY) is None:
 setGlobalVars()
 
 class EnhancedEditableText(EditableTextWithoutAutoSelectDetection):
+	def _get_caretMovementDetectionUsesEvents(self) -> bool:
+		return True
+	
 	__gestures = {
 		# these Rider commands change caret position, so they should trigger reading new line position
 		"kb:alt+downArrow" : "caret_moveByLine",
@@ -149,6 +154,54 @@ class EnhancedEditableText(EditableTextWithoutAutoSelectDetection):
 		PlaySound('SystemExclamation', SND_ASYNC | SND_ALIAS)
 
 
+"""
+Custom object for the list item in the code completion view.
+"""
+class CodeCompletionItem(NVDAObjects.JAB.JAB):
+	"""
+	Gets the content, of the documentation tooltip of a code completion item, if avaiable. 
+	If no documentation was found, None is returned.
+	"""
+	def getDocumentation(self) -> str:
+		if (not isinstance(self.parent, NVDAObjects.JAB.JAB)):
+			log.warn("fetching documentation failed, parent is not a JAB-Object.")
+			return None
+
+		if (self.parent.role != controlTypes.ROLE_LIST):
+			log.warn("fetching documentation failed, parent is not a list.")
+			return None
+		
+		if (not isinstance(self.parent.previous, NVDAObjects.JAB.JAB) 
+			or not isinstance(self.parent.previous.previous, NVDAObjects.JAB.JAB)
+			or self.parent.previous.previous.role != controlTypes.ROLE_WINDOW):
+			log.warn("fetching documentation failed, tooltip window not found.")
+			return None
+		
+		tooltipWindow = self.parent.previous.previous
+		currentObj = tooltipWindow
+		while currentObj is not None:
+			# search pattern for the documentation tooltip
+			if (currentObj.role == controlTypes.ROLE_SCROLLPANE):
+				# we have found the scrollpane, so let's search for the documentation textfield
+				currentObj = currentObj.firstChild
+				while currentObj is not None:	
+					if (currentObj.childCount > 0 and currentObj.firstChild.role == controlTypes.ROLE_LIST
+						and currentObj.firstChild.childCount > 0
+						and currentObj.firstChild.firstChild.role == controlTypes.ROLE_EDITABLETEXT
+						and currentObj.firstChild.firstChild.description == "text/html"):
+						# we found the documentation textfield, so let's extract the text
+						currentObj = currentObj.firstChild.firstChild
+						return currentObj.makeTextInfo(textInfos.POSITION_ALL).text
+					else:
+						currentObj = currentObj.next
+						continue
+			else:
+				currentObj = currentObj.firstChild
+
+		# the search pattern has failed
+		log.warn("fetching documentation failed, documentation textfield was not found.")
+		return None
+
 
 class AppModule(appModuleHandler.AppModule):
 	def __init__(self, pid, appName=None):
@@ -166,7 +219,21 @@ class AppModule(appModuleHandler.AppModule):
 	def chooseNVDAObjectOverlayClasses(self, obj, clsList):
 		if obj.role == EDITABLE_TEXT:
 			clsList.insert(0, EnhancedEditableText)
+		if (self.isCodeCompletionItem(obj)):
+			clsList.insert(0, CodeCompletionItem)
 
+
+
+	def isCodeCompletionItem(self, obj):
+		if (obj.role == controlTypes.ROLE_LISTITEM
+			and obj.parent.parent == api.getDesktopObject()
+			and obj.childCount == 3):
+			for child in obj.children:
+				if (child.role is not controlTypes.ROLE_STATICTEXT):
+					# this is not a code completion item
+					return False
+			return True;
+		return False
 
 	@script(
 		"Read the documentation",
@@ -174,16 +241,13 @@ class AppModule(appModuleHandler.AppModule):
 		category="Rider")
 	def script_readDocumentation(self, gesture):
 		obj = api.getFocusObject()
-		if not isinstance(obj.parent, NVDAObjects.JAB.JAB):
-			ui.message("nicht erfolgreich!")
-			return
-		
-		if not isinstance(obj.parent.simplePrevious, NVDAObjects.JAB.JAB):
-			ui.message("nicht erfolgreich typ 2!")
-			return
-		else:
-			#ui.message(obj.parent.simplePrevious.simpleFirstChild.role.name)
-			ui.message(obj.parent.previous.devInfo.__str__())
+		if isinstance(obj, CodeCompletionItem):
+			documentationText = obj.getDocumentation()
+			if (documentationText == None):
+				ui.message("Documentation not found!")
+			else:
+				ui.message(documentationText)
+
 
 	@script(
 		"Read the status bar",
